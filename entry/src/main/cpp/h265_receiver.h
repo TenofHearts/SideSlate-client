@@ -1,0 +1,95 @@
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <ace/xcomponent/native_interface_xcomponent.h>
+#include <multimedia/player_framework/native_avbuffer.h>
+#include <multimedia/player_framework/native_avcodec_base.h>
+#include <multimedia/player_framework/native_avcodec_videodecoder.h>
+#include <multimedia/player_framework/native_avformat.h>
+
+struct H265Stats {
+    bool running = false;
+    bool decoderStarted = false;
+    bool surfaceReady = false;
+    uint64_t packets = 0;
+    uint64_t bytes = 0;
+    uint64_t queuedInputs = 0;
+    uint64_t renderedOutputs = 0;
+    uint64_t droppedPackets = 0;
+    int32_t lastError = 0;
+    std::string status = "stopped";
+};
+
+class H265Receiver {
+public:
+    static H265Receiver& Instance();
+
+    void RegisterXComponent(OH_NativeXComponent* component);
+    void OnSurfaceCreated(OH_NativeXComponent* component, void* window);
+    void OnSurfaceChanged(OH_NativeXComponent* component, void* window);
+    void OnSurfaceDestroyed(OH_NativeXComponent* component, void* window);
+
+    bool Start(uint16_t port, int32_t width, int32_t height);
+    void Stop();
+    H265Stats GetStats();
+
+private:
+    H265Receiver() = default;
+    ~H265Receiver();
+    H265Receiver(const H265Receiver&) = delete;
+    H265Receiver& operator=(const H265Receiver&) = delete;
+
+    struct Packet {
+        uint32_t sequence = 0;
+        uint64_t timestampUs = 0;
+        uint32_t flags = 0;
+        std::vector<uint8_t> payload;
+    };
+
+    struct InputBufferRef {
+        uint32_t index = 0;
+        OH_AVBuffer* buffer = nullptr;
+    };
+
+    bool StartDecoderLocked();
+    void StopDecoderLocked();
+    void ReceiverLoop(uint16_t port);
+    void DecodeLoop();
+    void EnqueuePacket(Packet&& packet);
+    bool PopPacket(Packet& packet);
+    bool PopInputBuffer(InputBufferRef& input);
+    void PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Packet& packet);
+    void SetStatus(const std::string& status);
+    void SetError(int32_t error, const std::string& status);
+    void SetErrorLocked(int32_t error, const std::string& status);
+
+    static void OnCodecError(OH_AVCodec* codec, int32_t errorCode, void* userData);
+    static void OnCodecStreamChanged(OH_AVCodec* codec, OH_AVFormat* format, void* userData);
+    static void OnNeedInputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData);
+    static void OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData);
+
+    std::mutex mutex_;
+    std::condition_variable packetCv_;
+    std::condition_variable inputCv_;
+    std::atomic<bool> running_ {false};
+    std::thread receiverThread_;
+    std::thread decodeThread_;
+
+    OH_NativeXComponent* component_ = nullptr;
+    OHNativeWindow* nativeWindow_ = nullptr;
+    OH_AVCodec* decoder_ = nullptr;
+    int32_t width_ = 1920;
+    int32_t height_ = 1080;
+
+    std::deque<Packet> packets_;
+    std::deque<InputBufferRef> inputBuffers_;
+    H265Stats stats_;
+};

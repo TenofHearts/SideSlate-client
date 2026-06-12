@@ -1,0 +1,20 @@
+export interface H265Stats {
+  running: boolean;
+  decoderStarted: boolean;
+  surfaceReady: boolean;
+  packets: number;
+  bytes: number;
+  queuedInputs: number;
+  renderedOutputs: number;
+  droppedPackets: number;
+  lastError: number;
+  status: string;
+}
+
+declare const h265receiver: {
+  start(port: number, width: number, height: number): boolean;
+  stop(): void;
+  getStats(): H265Stats;
+};
+
+export default h265receiver;
