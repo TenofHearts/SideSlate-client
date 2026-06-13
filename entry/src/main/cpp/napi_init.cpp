@@ -68,6 +68,14 @@ napi_value GetStats(napi_env env, napi_callback_info)
     SetNamedNumber(env, object, "queuedInputs", static_cast<double>(stats.queuedInputs));
     SetNamedNumber(env, object, "renderedOutputs", static_cast<double>(stats.renderedOutputs));
     SetNamedNumber(env, object, "droppedPackets", static_cast<double>(stats.droppedPackets));
+    SetNamedNumber(env, object, "sequenceGaps", static_cast<double>(stats.sequenceGaps));
+    SetNamedNumber(env, object, "configPackets", static_cast<double>(stats.configPackets));
+    SetNamedNumber(env, object, "keyframes", static_cast<double>(stats.keyframes));
+    SetNamedNumber(env, object, "lastSequence", static_cast<double>(stats.lastSequence));
+    SetNamedNumber(env, object, "queueDepth", static_cast<double>(stats.queueDepth));
+    SetNamedNumber(env, object, "streamWidth", static_cast<double>(stats.streamWidth));
+    SetNamedNumber(env, object, "streamHeight", static_cast<double>(stats.streamHeight));
+    SetNamedNumber(env, object, "streamFps", static_cast<double>(stats.streamFps));
     SetNamedNumber(env, object, "lastError", static_cast<double>(stats.lastError));
     SetNamedString(env, object, "status", stats.status);
     return object;

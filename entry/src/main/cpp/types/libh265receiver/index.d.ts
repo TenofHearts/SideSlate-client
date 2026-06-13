@@ -7,6 +7,14 @@ export interface H265Stats {
   queuedInputs: number;
   renderedOutputs: number;
   droppedPackets: number;
+  sequenceGaps: number;
+  configPackets: number;
+  keyframes: number;
+  lastSequence: number;
+  queueDepth: number;
+  streamWidth: number;
+  streamHeight: number;
+  streamFps: number;
   lastError: number;
   status: string;
 }

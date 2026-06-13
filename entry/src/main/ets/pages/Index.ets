@@ -14,12 +14,28 @@ struct Index {
   @State private dropped: number = 0;
   @State private bytes: number = 0;
   @State private queuedInputs: number = 0;
+  @State private sequenceGaps: number = 0;
+  @State private configPackets: number = 0;
+  @State private keyframes: number = 0;
+  @State private queueDepth: number = 0;
+  @State private streamWidth: number = 0;
+  @State private streamHeight: number = 0;
+  @State private streamFps: number = 0;
   @State private surfaceReady: boolean = false;
   @State private decoderStarted: boolean = false;
   @State private lastError: number = 0;
   @State private showOverlay: boolean = true;
+  @State private receiveMbps: number = 0;
+  @State private inputRate: number = 0;
+  @State private renderRate: number = 0;
+  @State private dropRate: number = 0;
 
   private statsTimer: number = -1;
+  private lastStatsAt: number = 0;
+  private lastBytes: number = 0;
+  private lastQueuedInputs: number = 0;
+  private lastRendered: number = 0;
+  private lastDropped: number = 0;
 
   aboutToDisappear(): void {
     this.stopReceiver();
@@ -39,6 +55,20 @@ struct Index {
 
   private refreshStats(): void {
     const stats: H265Stats = h265receiver.getStats();
+    const now: number = Date.now();
+    if (this.lastStatsAt > 0) {
+      const elapsedSeconds: number = Math.max((now - this.lastStatsAt) / 1000, 0.001);
+      this.receiveMbps = (stats.bytes - this.lastBytes) * 8 / elapsedSeconds / 1000000;
+      this.inputRate = (stats.queuedInputs - this.lastQueuedInputs) / elapsedSeconds;
+      this.renderRate = (stats.renderedOutputs - this.lastRendered) / elapsedSeconds;
+      this.dropRate = (stats.droppedPackets - this.lastDropped) / elapsedSeconds;
+    }
+    this.lastStatsAt = now;
+    this.lastBytes = stats.bytes;
+    this.lastQueuedInputs = stats.queuedInputs;
+    this.lastRendered = stats.renderedOutputs;
+    this.lastDropped = stats.droppedPackets;
+
     this.running = stats.running;
     this.status = stats.status;
     this.packets = stats.packets;
@@ -46,6 +76,13 @@ struct Index {
     this.dropped = stats.droppedPackets;
     this.bytes = stats.bytes;
     this.queuedInputs = stats.queuedInputs;
+    this.sequenceGaps = stats.sequenceGaps;
+    this.configPackets = stats.configPackets;
+    this.keyframes = stats.keyframes;
+    this.queueDepth = stats.queueDepth;
+    this.streamWidth = stats.streamWidth;
+    this.streamHeight = stats.streamHeight;
+    this.streamFps = stats.streamFps;
     this.surfaceReady = stats.surfaceReady;
     this.decoderStarted = stats.decoderStarted;
     this.lastError = stats.lastError;
@@ -55,6 +92,11 @@ struct Index {
   }
 
   private startReceiver(): void {
+    this.lastStatsAt = 0;
+    this.lastBytes = 0;
+    this.lastQueuedInputs = 0;
+    this.lastRendered = 0;
+    this.lastDropped = 0;
     const started: boolean = h265receiver.start(LISTEN_PORT, DEFAULT_WIDTH, DEFAULT_HEIGHT);
     this.running = started;
     this.status = started ? 'Receiver start requested.' : 'Receiver failed to start.';
@@ -118,7 +160,16 @@ struct Index {
         Text(`Surface: ${this.surfaceReady}  Decoder: ${this.decoderStarted}  Error: ${this.lastError}`)
           .fontSize(13)
           .fontColor(0xd1d5db)
+        Text(`Stream: ${this.streamWidth}x${this.streamHeight} @ ${this.streamFps} fps  Queue: ${this.queueDepth}`)
+          .fontSize(13)
+          .fontColor(0xd1d5db)
         Text(`Packets: ${this.packets}  Rendered: ${this.rendered}  Dropped: ${this.dropped}`)
+          .fontSize(13)
+          .fontColor(0xd1d5db)
+        Text(`Rates: RX ${this.receiveMbps.toFixed(1)} Mbps  In ${this.inputRate.toFixed(1)}/s  Render ${this.renderRate.toFixed(1)}/s  Drop ${this.dropRate.toFixed(1)}/s`)
+          .fontSize(13)
+          .fontColor(0xd1d5db)
+        Text(`Config: ${this.configPackets}  Keyframes: ${this.keyframes}  Gaps: ${this.sequenceGaps}`)
           .fontSize(13)
           .fontColor(0xd1d5db)
         Text(`Inputs: ${this.queuedInputs}  Bytes: ${this.bytes}`)

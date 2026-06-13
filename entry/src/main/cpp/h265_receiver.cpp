@@ -1,4 +1,5 @@
 #include "h265_receiver.h"
+#include "t2s_protocol.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -10,6 +11,7 @@
 #include <fcntl.h>
 #include <hilog/log.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -19,40 +21,7 @@
 namespace {
 constexpr uint32_t T2S_LOG_DOMAIN = 0x545253;
 constexpr const char* T2S_LOG_TAG = "T2SH265";
-constexpr uint8_t MAGIC[] = {'T', '2', 'H', '5'};
-constexpr size_t HEADER_SIZE = 24;
-constexpr size_t MAX_PACKET_BYTES = 64 * 1024 * 1024;
-constexpr size_t MAX_PENDING_PACKETS = 3;
-
-uint32_t ReadU32Le(const uint8_t* data)
-{
-    return static_cast<uint32_t>(data[0]) |
-        (static_cast<uint32_t>(data[1]) << 8) |
-        (static_cast<uint32_t>(data[2]) << 16) |
-        (static_cast<uint32_t>(data[3]) << 24);
-}
-
-uint64_t ReadU64Le(const uint8_t* data)
-{
-    uint64_t value = 0;
-    for (int index = 7; index >= 0; --index) {
-        value = (value << 8) | data[index];
-    }
-    return value;
-}
-
-bool RecvExact(int socketFd, uint8_t* data, size_t size)
-{
-    size_t offset = 0;
-    while (offset < size) {
-        ssize_t readSize = recv(socketFd, data + offset, size - offset, 0);
-        if (readSize <= 0) {
-            return false;
-        }
-        offset += static_cast<size_t>(readSize);
-    }
-    return true;
-}
+constexpr size_t MAX_PENDING_PACKETS = 1;
 }
 
 H265Receiver& H265Receiver::Instance()
@@ -96,7 +65,7 @@ void H265Receiver::OnSurfaceCreated(OH_NativeXComponent*, void* window)
     nativeWindow_ = reinterpret_cast<OHNativeWindow*>(window);
     stats_.surfaceReady = nativeWindow_ != nullptr;
     stats_.status = "surface created";
-    if (running_ && !decoder_) {
+    if (running_ && configured_ && !decoder_) {
         StartDecoderLocked();
     }
 }
@@ -129,9 +98,8 @@ bool H265Receiver::Start(uint16_t port, int32_t width, int32_t height)
         stats_.surfaceReady = nativeWindow_ != nullptr;
         stats_.status = "starting";
         running_ = true;
-        if (nativeWindow_) {
-            StartDecoderLocked();
-        }
+        configured_ = false;
+        hasLastSequence_ = false;
     }
 
     receiverThread_ = std::thread(&H265Receiver::ReceiverLoop, this, port);
@@ -286,35 +254,91 @@ void H265Receiver::ReceiverLoop(uint16_t port)
         }
 
         timeval receiveTimeout {};
-        receiveTimeout.tv_sec = 2;
+        receiveTimeout.tv_sec = 30;
         receiveTimeout.tv_usec = 0;
         setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout, sizeof(receiveTimeout));
+        setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
         SetStatus("sender connected");
-        std::vector<uint8_t> header(HEADER_SIZE);
-        while (running_ && RecvExact(clientFd, header.data(), header.size())) {
-            if (!std::equal(std::begin(MAGIC), std::end(MAGIC), header.begin())) {
-                SetError(-2, "bad packet magic");
-                break;
-            }
-            Packet packet;
-            packet.sequence = ReadU32Le(header.data() + 4);
-            packet.timestampUs = ReadU64Le(header.data() + 8);
-            packet.flags = ReadU32Le(header.data() + 16);
-            uint32_t payloadLen = ReadU32Le(header.data() + 20);
-            if (payloadLen == 0 || payloadLen > MAX_PACKET_BYTES) {
-                SetError(-3, "invalid payload length");
-                break;
-            }
-            packet.payload.resize(payloadLen);
-            if (!RecvExact(clientFd, packet.payload.data(), packet.payload.size())) {
-                break;
-            }
-            EnqueuePacket(std::move(packet));
-        }
+        HandleClient(clientFd);
         close(clientFd);
         SetStatus("sender disconnected");
     }
     close(serverFd);
+}
+
+bool H265Receiver::HandleClient(int clientFd)
+{
+    std::string error;
+    t2s::Message message;
+    if (!t2s::ReadMessage(clientFd, message, error)) {
+        SetError(-2, error);
+        return false;
+    }
+    if (message.type != t2s::TYPE_HELLO) {
+        SetError(-3, "expected hello");
+        return false;
+    }
+    if (!t2s::WriteMessage(clientFd, {t2s::TYPE_HELLO_ACK, 0, 0, 0, t2s::HelloAckPayload()}, error)) {
+        SetError(-4, error);
+        return false;
+    }
+
+    if (!t2s::ReadMessage(clientFd, message, error)) {
+        SetError(-5, error);
+        return false;
+    }
+    t2s::VideoConfig config;
+    if (!t2s::ParseVideoConfig(message, config, error)) {
+        SetError(-6, error);
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        StopDecoderLocked();
+        packets_.clear();
+        inputBuffers_.clear();
+        width_ = static_cast<int32_t>(config.width);
+        height_ = static_cast<int32_t>(config.height);
+        configured_ = true;
+        hasLastSequence_ = false;
+        stats_.streamWidth = width_;
+        stats_.streamHeight = height_;
+        stats_.streamFps = config.fpsDen == 0 ? 0 : static_cast<int32_t>(config.fpsNum / config.fpsDen);
+        stats_.queueDepth = 0;
+        stats_.status = "video config received";
+        if (nativeWindow_) {
+            StartDecoderLocked();
+        }
+    }
+    if (!t2s::WriteMessage(clientFd, {t2s::TYPE_VIDEO_CONFIG_ACK, 0, 1, 0, t2s::EmptyPayload()}, error)) {
+        SetError(-7, error);
+        return false;
+    }
+
+    while (running_ && t2s::ReadMessage(clientFd, message, error)) {
+        if (message.type == t2s::TYPE_STOP) {
+            SetStatus("stop received");
+            return true;
+        }
+        if (message.type != t2s::TYPE_VIDEO_PACKET) {
+            SetError(-8, "unexpected message type");
+            return false;
+        }
+        if (message.payload.empty()) {
+            SetError(-9, "empty video packet");
+            return false;
+        }
+        Packet packet;
+        packet.sequence = message.sequence;
+        packet.timestampUs = message.timestampUs;
+        packet.flags = message.flags;
+        packet.payload = std::move(message.payload);
+        EnqueuePacket(std::move(packet));
+    }
+    if (running_ && !error.empty()) {
+        SetError(-10, error);
+    }
+    return false;
 }
 
 void H265Receiver::DecodeLoop()
@@ -337,12 +361,48 @@ void H265Receiver::EnqueuePacket(Packet&& packet)
     std::lock_guard<std::mutex> lock(mutex_);
     stats_.packets += 1;
     stats_.bytes += packet.payload.size();
+    if (hasLastSequence_ && packet.sequence != stats_.lastSequence + 1) {
+        stats_.sequenceGaps += 1;
+    }
+    hasLastSequence_ = true;
+    stats_.lastSequence = packet.sequence;
+    if ((packet.flags & t2s::FLAG_CONFIG_NAL) != 0) {
+        stats_.configPackets += 1;
+    }
+    if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
+        stats_.keyframes += 1;
+    }
     while (packets_.size() >= MAX_PENDING_PACKETS) {
-        packets_.pop_front();
-        stats_.droppedPackets += 1;
+        if (!DropOneStalePacketLocked()) {
+            break;
+        }
     }
     packets_.push_back(std::move(packet));
+    stats_.queueDepth = static_cast<uint32_t>(packets_.size());
     packetCv_.notify_one();
+}
+
+bool H265Receiver::DropOneStalePacketLocked()
+{
+    auto droppable = std::find_if(packets_.begin(), packets_.end(), [](const Packet& packet) {
+        return (packet.flags & t2s::FLAG_DROPPABLE) != 0;
+    });
+    if (droppable != packets_.end()) {
+        packets_.erase(droppable);
+        stats_.droppedPackets += 1;
+        return true;
+    }
+
+    auto nonConfig = std::find_if(packets_.begin(), packets_.end(), [](const Packet& packet) {
+        return (packet.flags & t2s::FLAG_CONFIG_NAL) == 0;
+    });
+    if (nonConfig != packets_.end()) {
+        packets_.erase(nonConfig);
+        stats_.droppedPackets += 1;
+        return true;
+    }
+
+    return false;
 }
 
 bool H265Receiver::PopPacket(Packet& packet)
@@ -354,6 +414,7 @@ bool H265Receiver::PopPacket(Packet& packet)
     }
     packet = std::move(packets_.front());
     packets_.pop_front();
+    stats_.queueDepth = static_cast<uint32_t>(packets_.size());
     return true;
 }
 

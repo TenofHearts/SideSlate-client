@@ -24,6 +24,14 @@ struct H265Stats {
     uint64_t queuedInputs = 0;
     uint64_t renderedOutputs = 0;
     uint64_t droppedPackets = 0;
+    uint64_t sequenceGaps = 0;
+    uint64_t configPackets = 0;
+    uint64_t keyframes = 0;
+    uint32_t lastSequence = 0;
+    uint32_t queueDepth = 0;
+    int32_t streamWidth = 0;
+    int32_t streamHeight = 0;
+    int32_t streamFps = 0;
     int32_t lastError = 0;
     std::string status = "stopped";
 };
@@ -50,7 +58,7 @@ private:
     struct Packet {
         uint32_t sequence = 0;
         uint64_t timestampUs = 0;
-        uint32_t flags = 0;
+        uint16_t flags = 0;
         std::vector<uint8_t> payload;
     };
 
@@ -62,8 +70,10 @@ private:
     bool StartDecoderLocked();
     void StopDecoderLocked();
     void ReceiverLoop(uint16_t port);
+    bool HandleClient(int clientFd);
     void DecodeLoop();
     void EnqueuePacket(Packet&& packet);
+    bool DropOneStalePacketLocked();
     bool PopPacket(Packet& packet);
     bool PopInputBuffer(InputBufferRef& input);
     void PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Packet& packet);
@@ -88,6 +98,8 @@ private:
     OH_AVCodec* decoder_ = nullptr;
     int32_t width_ = 1920;
     int32_t height_ = 1080;
+    bool configured_ = false;
+    bool hasLastSequence_ = false;
 
     std::deque<Packet> packets_;
     std::deque<InputBufferRef> inputBuffers_;

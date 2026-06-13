@@ -6,6 +6,7 @@ set(NATIVERENDER_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(h265receiver SHARED
     napi_init.cpp
     h265_receiver.cpp
+    t2s_protocol.cpp
 )
 
 target_include_directories(h265receiver PRIVATE
