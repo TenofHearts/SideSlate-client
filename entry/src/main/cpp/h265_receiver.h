@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -33,6 +34,9 @@ struct H265Stats {
     int32_t streamHeight = 0;
     int32_t streamFps = 0;
     int32_t lastError = 0;
+    double maxReceiveGapMs = 0.0;
+    double maxInputGapMs = 0.0;
+    double maxRenderGapMs = 0.0;
     std::string status = "stopped";
 };
 
@@ -73,7 +77,6 @@ private:
     bool HandleClient(int clientFd);
     void DecodeLoop();
     void EnqueuePacket(Packet&& packet);
-    bool DropOneStalePacketLocked();
     bool PopPacket(Packet& packet);
     bool PopInputBuffer(InputBufferRef& input);
     void PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Packet& packet);
@@ -103,5 +106,8 @@ private:
 
     std::deque<Packet> packets_;
     std::deque<InputBufferRef> inputBuffers_;
+    std::chrono::steady_clock::time_point lastReceiveAt_ {};
+    std::chrono::steady_clock::time_point lastInputAt_ {};
+    std::chrono::steady_clock::time_point lastRenderAt_ {};
     H265Stats stats_;
 };

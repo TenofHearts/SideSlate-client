@@ -44,6 +44,16 @@ private:
     std::shared_ptr<std::atomic<bool>> running_;
     std::thread thread_;
 };
+
+double MillisecondsBetween(
+    std::chrono::steady_clock::time_point previous,
+    std::chrono::steady_clock::time_point current)
+{
+    if (previous == std::chrono::steady_clock::time_point{}) {
+        return 0.0;
+    }
+    return std::chrono::duration<double, std::milli>(current - previous).count();
+}
 }
 
 H265Receiver& H265Receiver::Instance()
@@ -122,6 +132,9 @@ bool H265Receiver::Start(uint16_t port, int32_t width, int32_t height)
         running_ = true;
         configured_ = false;
         hasLastSequence_ = false;
+        lastReceiveAt_ = {};
+        lastInputAt_ = {};
+        lastRenderAt_ = {};
     }
 
     receiverThread_ = std::thread(&H265Receiver::ReceiverLoop, this, port);
@@ -340,9 +353,19 @@ bool H265Receiver::HandleClient(int clientFd)
     auto statsRunning = std::make_shared<std::atomic<bool>>(true);
     ScopedStatsThread statsThread(statsRunning, std::thread([this, clientFd, statsRunning]() {
         std::string statsError;
+        auto lastSampleAt = std::chrono::steady_clock::now();
+        uint64_t lastBytes = 0;
+        uint64_t lastQueuedInputs = 0;
+        uint64_t lastRenderedOutputs = 0;
+        uint64_t lastDroppedPackets = 0;
         while (running_ && statsRunning->load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             H265Stats stats = GetStats();
+            auto now = std::chrono::steady_clock::now();
+            double elapsedSeconds = std::chrono::duration<double>(now - lastSampleAt).count();
+            if (elapsedSeconds <= 0.0) {
+                elapsedSeconds = 0.001;
+            }
             t2s::ReceiverStatsPayload payload {};
             payload.running = stats.running;
             payload.decoderStarted = stats.decoderStarted;
@@ -361,9 +384,21 @@ bool H265Receiver::HandleClient(int clientFd)
             payload.streamHeight = stats.streamHeight;
             payload.streamFps = stats.streamFps;
             payload.lastError = stats.lastError;
+            payload.receiveMbps = static_cast<double>(stats.bytes - lastBytes) * 8.0 / elapsedSeconds / 1000000.0;
+            payload.inputFps = static_cast<double>(stats.queuedInputs - lastQueuedInputs) / elapsedSeconds;
+            payload.renderFps = static_cast<double>(stats.renderedOutputs - lastRenderedOutputs) / elapsedSeconds;
+            payload.dropFps = static_cast<double>(stats.droppedPackets - lastDroppedPackets) / elapsedSeconds;
+            payload.maxReceiveGapMs = stats.maxReceiveGapMs;
+            payload.maxInputGapMs = stats.maxInputGapMs;
+            payload.maxRenderGapMs = stats.maxRenderGapMs;
             if (!t2s::WriteMessage(clientFd, {t2s::TYPE_STATS, 0, 0, 0, t2s::StatsPayload(payload)}, statsError)) {
                 break;
             }
+            lastSampleAt = now;
+            lastBytes = stats.bytes;
+            lastQueuedInputs = stats.queuedInputs;
+            lastRenderedOutputs = stats.renderedOutputs;
+            lastDroppedPackets = stats.droppedPackets;
         }
     }));
 
@@ -411,6 +446,9 @@ void H265Receiver::DecodeLoop()
 void H265Receiver::EnqueuePacket(Packet&& packet)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    auto now = std::chrono::steady_clock::now();
+    stats_.maxReceiveGapMs = std::max(stats_.maxReceiveGapMs, MillisecondsBetween(lastReceiveAt_, now));
+    lastReceiveAt_ = now;
     stats_.packets += 1;
     stats_.bytes += packet.payload.size();
     if (hasLastSequence_ && packet.sequence != stats_.lastSequence + 1) {
@@ -423,8 +461,6 @@ void H265Receiver::EnqueuePacket(Packet&& packet)
     }
     if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
         stats_.keyframes += 1;
-    }
-    while (packets_.size() >= MAX_PENDING_PACKETS && DropOneStalePacketLocked()) {
     }
     if (packets_.size() >= MAX_PENDING_PACKETS) {
         if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
@@ -441,29 +477,6 @@ void H265Receiver::EnqueuePacket(Packet&& packet)
     packetCv_.notify_one();
 }
 
-bool H265Receiver::DropOneStalePacketLocked()
-{
-    auto droppable = std::find_if(packets_.begin(), packets_.end(), [](const Packet& packet) {
-        return (packet.flags & t2s::FLAG_DROPPABLE) != 0;
-    });
-    if (droppable != packets_.end()) {
-        packets_.erase(droppable);
-        stats_.droppedPackets += 1;
-        return true;
-    }
-
-    auto nonConfig = std::find_if(packets_.begin(), packets_.end(), [](const Packet& packet) {
-        return (packet.flags & t2s::FLAG_CONFIG_NAL) == 0;
-    });
-    if (nonConfig != packets_.end()) {
-        packets_.erase(nonConfig);
-        stats_.droppedPackets += 1;
-        return true;
-    }
-
-    return false;
-}
-
 bool H265Receiver::PopPacket(Packet& packet)
 {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -471,11 +484,8 @@ bool H265Receiver::PopPacket(Packet& packet)
     if (!running_.load() || packets_.empty()) {
         return false;
     }
-    if (packets_.size() > 1) {
-        stats_.droppedPackets += packets_.size() - 1;
-    }
-    packet = std::move(packets_.back());
-    packets_.clear();
+    packet = std::move(packets_.front());
+    packets_.pop_front();
     stats_.queueDepth = static_cast<uint32_t>(packets_.size());
     return true;
 }
@@ -522,6 +532,9 @@ void H265Receiver::PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Pa
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    auto now = std::chrono::steady_clock::now();
+    stats_.maxInputGapMs = std::max(stats_.maxInputGapMs, MillisecondsBetween(lastInputAt_, now));
+    lastInputAt_ = now;
     stats_.queuedInputs += 1;
 }
 
@@ -578,5 +591,9 @@ void H265Receiver::OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuf
         return;
     }
     std::lock_guard<std::mutex> lock(receiver->mutex_);
+    auto now = std::chrono::steady_clock::now();
+    receiver->stats_.maxRenderGapMs =
+        std::max(receiver->stats_.maxRenderGapMs, MillisecondsBetween(receiver->lastRenderAt_, now));
+    receiver->lastRenderAt_ = now;
     receiver->stats_.renderedOutputs += 1;
 }

@@ -16,6 +16,9 @@ export interface H265Stats {
   streamHeight: number;
   streamFps: number;
   lastError: number;
+  maxReceiveGapMs: number;
+  maxInputGapMs: number;
+  maxRenderGapMs: number;
   status: string;
 }
 

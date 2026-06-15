@@ -77,6 +77,9 @@ napi_value GetStats(napi_env env, napi_callback_info)
     SetNamedNumber(env, object, "streamHeight", static_cast<double>(stats.streamHeight));
     SetNamedNumber(env, object, "streamFps", static_cast<double>(stats.streamFps));
     SetNamedNumber(env, object, "lastError", static_cast<double>(stats.lastError));
+    SetNamedNumber(env, object, "maxReceiveGapMs", stats.maxReceiveGapMs);
+    SetNamedNumber(env, object, "maxInputGapMs", stats.maxInputGapMs);
+    SetNamedNumber(env, object, "maxRenderGapMs", stats.maxRenderGapMs);
     SetNamedString(env, object, "status", stats.status);
     return object;
 }

@@ -17,6 +17,9 @@ declare module 'libh265receiver.so' {
     streamHeight: number;
     streamFps: number;
     lastError: number;
+    maxReceiveGapMs: number;
+    maxInputGapMs: number;
+    maxRenderGapMs: number;
     status: string;
   }
 
