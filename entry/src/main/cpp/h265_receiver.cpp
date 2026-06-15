@@ -24,6 +24,7 @@ namespace {
 constexpr uint32_t T2S_LOG_DOMAIN = 0x545253;
 constexpr const char* T2S_LOG_TAG = "T2SH265";
 constexpr size_t MAX_PENDING_PACKETS = 1;
+constexpr size_t MAX_TRACKED_FRAME_TIMINGS = 240;
 
 class ScopedStatsThread {
 public:
@@ -159,6 +160,7 @@ void H265Receiver::Stop()
     StopDecoderLocked();
     packets_.clear();
     inputBuffers_.clear();
+    frameTimings_.clear();
     stats_.running = false;
     stats_.decoderStarted = false;
     stats_.status = "stopped";
@@ -333,6 +335,7 @@ bool H265Receiver::HandleClient(int clientFd)
         StopDecoderLocked();
         packets_.clear();
         inputBuffers_.clear();
+        frameTimings_.clear();
         width_ = static_cast<int32_t>(config.width);
         height_ = static_cast<int32_t>(config.height);
         configured_ = true;
@@ -392,6 +395,12 @@ bool H265Receiver::HandleClient(int clientFd)
             payload.maxReceiveGapMs = stats.maxReceiveGapMs;
             payload.maxInputGapMs = stats.maxInputGapMs;
             payload.maxRenderGapMs = stats.maxRenderGapMs;
+            payload.latestReceiveToInputMs = stats.latestReceiveToInputMs;
+            payload.latestInputToRenderMs = stats.latestInputToRenderMs;
+            payload.latestReceiveToRenderMs = stats.latestReceiveToRenderMs;
+            payload.maxReceiveToInputMs = stats.maxReceiveToInputMs;
+            payload.maxInputToRenderMs = stats.maxInputToRenderMs;
+            payload.maxReceiveToRenderMs = stats.maxReceiveToRenderMs;
             if (!t2s::WriteMessage(clientFd, {t2s::TYPE_STATS, 0, 0, 0, t2s::StatsPayload(payload)}, statsError)) {
                 break;
             }
@@ -420,6 +429,7 @@ bool H265Receiver::HandleClient(int clientFd)
         packet.sequence = message.sequence;
         packet.timestampUs = message.timestampUs;
         packet.flags = message.flags;
+        packet.receivedAt = std::chrono::steady_clock::now();
         packet.payload = std::move(message.payload);
         EnqueuePacket(std::move(packet));
     }
@@ -544,6 +554,13 @@ void H265Receiver::PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Pa
     auto now = std::chrono::steady_clock::now();
     stats_.maxInputGapMs = std::max(stats_.maxInputGapMs, MillisecondsBetween(lastInputAt_, now));
     lastInputAt_ = now;
+    const double receiveToInputMs = MillisecondsBetween(packet.receivedAt, now);
+    stats_.latestReceiveToInputMs = receiveToInputMs;
+    stats_.maxReceiveToInputMs = std::max(stats_.maxReceiveToInputMs, receiveToInputMs);
+    frameTimings_[attr.pts] = {packet.receivedAt, now};
+    if (frameTimings_.size() > MAX_TRACKED_FRAME_TIMINGS) {
+        frameTimings_.erase(frameTimings_.begin());
+    }
     stats_.queuedInputs += 1;
 }
 
@@ -590,9 +607,11 @@ void H265Receiver::OnNeedInputBuffer(OH_AVCodec*, uint32_t index, OH_AVBuffer* b
     receiver->inputCv_.notify_one();
 }
 
-void H265Receiver::OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer*, void* userData)
+void H265Receiver::OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuffer* buffer, void* userData)
 {
     auto* receiver = static_cast<H265Receiver*>(userData);
+    OH_AVCodecBufferAttr attr {};
+    bool hasAttr = buffer && OH_AVBuffer_GetBufferAttr(buffer, &attr) == AV_ERR_OK;
     OH_AVErrCode result = OH_VideoDecoder_RenderOutputBuffer(codec, index);
     if (result != AV_ERR_OK) {
         receiver->SetError(result, "render output failed");
@@ -604,5 +623,19 @@ void H265Receiver::OnNewOutputBuffer(OH_AVCodec* codec, uint32_t index, OH_AVBuf
     receiver->stats_.maxRenderGapMs =
         std::max(receiver->stats_.maxRenderGapMs, MillisecondsBetween(receiver->lastRenderAt_, now));
     receiver->lastRenderAt_ = now;
+    if (hasAttr) {
+        auto timing = receiver->frameTimings_.find(attr.pts);
+        if (timing != receiver->frameTimings_.end()) {
+            const double inputToRenderMs = MillisecondsBetween(timing->second.inputAt, now);
+            const double receiveToRenderMs = MillisecondsBetween(timing->second.receivedAt, now);
+            receiver->stats_.latestInputToRenderMs = inputToRenderMs;
+            receiver->stats_.latestReceiveToRenderMs = receiveToRenderMs;
+            receiver->stats_.maxInputToRenderMs =
+                std::max(receiver->stats_.maxInputToRenderMs, inputToRenderMs);
+            receiver->stats_.maxReceiveToRenderMs =
+                std::max(receiver->stats_.maxReceiveToRenderMs, receiveToRenderMs);
+            receiver->frameTimings_.erase(timing);
+        }
+    }
     receiver->stats_.renderedOutputs += 1;
 }

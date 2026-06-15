@@ -75,6 +75,12 @@ struct ReceiverStatsPayload {
     double maxReceiveGapMs = 0.0;
     double maxInputGapMs = 0.0;
     double maxRenderGapMs = 0.0;
+    double latestReceiveToInputMs = 0.0;
+    double latestInputToRenderMs = 0.0;
+    double latestReceiveToRenderMs = 0.0;
+    double maxReceiveToInputMs = 0.0;
+    double maxInputToRenderMs = 0.0;
+    double maxReceiveToRenderMs = 0.0;
 };
 
 bool ReadMessage(int socketFd, Message& message, std::string& error);

@@ -197,7 +197,7 @@ std::vector<uint8_t> EmptyPayload()
 
 std::vector<uint8_t> StatsPayload(const ReceiverStatsPayload& stats)
 {
-    std::vector<uint8_t> payload(152, 0);
+    std::vector<uint8_t> payload(200, 0);
     uint32_t flags = 0;
     if (stats.running) {
         flags |= 0x01;
@@ -230,6 +230,12 @@ std::vector<uint8_t> StatsPayload(const ReceiverStatsPayload& stats)
     WriteDoubleLe(payload.data() + 128, stats.maxReceiveGapMs);
     WriteDoubleLe(payload.data() + 136, stats.maxInputGapMs);
     WriteDoubleLe(payload.data() + 144, stats.maxRenderGapMs);
+    WriteDoubleLe(payload.data() + 152, stats.latestReceiveToInputMs);
+    WriteDoubleLe(payload.data() + 160, stats.latestInputToRenderMs);
+    WriteDoubleLe(payload.data() + 168, stats.latestReceiveToRenderMs);
+    WriteDoubleLe(payload.data() + 176, stats.maxReceiveToInputMs);
+    WriteDoubleLe(payload.data() + 184, stats.maxInputToRenderMs);
+    WriteDoubleLe(payload.data() + 192, stats.maxReceiveToRenderMs);
     return payload;
 }
 

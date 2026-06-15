@@ -7,6 +7,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <thread>
 #include <vector>
 
@@ -37,6 +38,12 @@ struct H265Stats {
     double maxReceiveGapMs = 0.0;
     double maxInputGapMs = 0.0;
     double maxRenderGapMs = 0.0;
+    double latestReceiveToInputMs = 0.0;
+    double latestInputToRenderMs = 0.0;
+    double latestReceiveToRenderMs = 0.0;
+    double maxReceiveToInputMs = 0.0;
+    double maxInputToRenderMs = 0.0;
+    double maxReceiveToRenderMs = 0.0;
     std::string status = "stopped";
 };
 
@@ -63,12 +70,18 @@ private:
         uint32_t sequence = 0;
         uint64_t timestampUs = 0;
         uint16_t flags = 0;
+        std::chrono::steady_clock::time_point receivedAt {};
         std::vector<uint8_t> payload;
     };
 
     struct InputBufferRef {
         uint32_t index = 0;
         OH_AVBuffer* buffer = nullptr;
+    };
+
+    struct FrameTiming {
+        std::chrono::steady_clock::time_point receivedAt {};
+        std::chrono::steady_clock::time_point inputAt {};
     };
 
     bool StartDecoderLocked();
@@ -106,6 +119,7 @@ private:
 
     std::deque<Packet> packets_;
     std::deque<InputBufferRef> inputBuffers_;
+    std::unordered_map<int64_t, FrameTiming> frameTimings_;
     std::chrono::steady_clock::time_point lastReceiveAt_ {};
     std::chrono::steady_clock::time_point lastInputAt_ {};
     std::chrono::steady_clock::time_point lastRenderAt_ {};
