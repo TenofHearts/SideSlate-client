@@ -200,6 +200,7 @@ bool H265Receiver::StartDecoderLocked()
     OH_AVFormat_SetStringValue(format, OH_MD_KEY_CODEC_MIME, OH_AVCODEC_MIMETYPE_VIDEO_HEVC);
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_WIDTH, width_);
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_HEIGHT, height_);
+    OH_AVFormat_SetIntValue(format, OH_MD_KEY_VIDEO_ENABLE_LOW_LATENCY, 1);
 
     result = OH_VideoDecoder_Configure(decoder_, format);
     OH_AVFormat_Destroy(format);
@@ -462,15 +463,23 @@ void H265Receiver::EnqueuePacket(Packet&& packet)
     if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
         stats_.keyframes += 1;
     }
-    if (packets_.size() >= MAX_PENDING_PACKETS) {
+    while (packets_.size() >= MAX_PENDING_PACKETS) {
         if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
             stats_.droppedPackets += packets_.size();
             packets_.clear();
-        } else {
-            stats_.droppedPackets += 1;
-            stats_.queueDepth = static_cast<uint32_t>(packets_.size());
-            return;
+            break;
         }
+        auto stale = std::find_if(packets_.begin(), packets_.end(), [](const Packet& queued) {
+            return (queued.flags & t2s::FLAG_DROPPABLE) != 0;
+        });
+        if (stale != packets_.end()) {
+            packets_.erase(stale);
+            stats_.droppedPackets += 1;
+            continue;
+        }
+        stats_.droppedPackets += 1;
+        stats_.queueDepth = static_cast<uint32_t>(packets_.size());
+        return;
     }
     packets_.push_back(std::move(packet));
     stats_.queueDepth = static_cast<uint32_t>(packets_.size());
