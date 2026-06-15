@@ -1,4 +1,5 @@
 import h265receiver, { H265Stats } from 'libh265receiver.so';
+import { window } from '@kit.ArkUI';
 
 const LISTEN_PORT: number = 7005;
 const DEFAULT_WIDTH: number = 1920;
@@ -29,6 +30,10 @@ struct Index {
   @State private inputRate: number = 0;
   @State private renderRate: number = 0;
   @State private dropRate: number = 0;
+  @State private viewportWidth: number = 0;
+  @State private viewportHeight: number = 0;
+  @State private displayWidth: number = 0;
+  @State private displayHeight: number = 0;
 
   private statsTimer: number = -1;
   private lastStatsAt: number = 0;
@@ -36,9 +41,50 @@ struct Index {
   private lastQueuedInputs: number = 0;
   private lastRendered: number = 0;
   private lastDropped: number = 0;
+  private keepScreenOn: boolean = false;
 
   aboutToDisappear(): void {
     this.stopReceiver();
+    this.setKeepScreenOn(false);
+  }
+
+  private updateDisplaySize(): void {
+    const sourceWidth: number = this.streamWidth > 0 ? this.streamWidth : DEFAULT_WIDTH;
+    const sourceHeight: number = this.streamHeight > 0 ? this.streamHeight : DEFAULT_HEIGHT;
+    const viewportPixelWidth: number = this.viewportWidth > 0 ? vp2px(this.viewportWidth) : sourceWidth;
+    const viewportPixelHeight: number = this.viewportHeight > 0 ? vp2px(this.viewportHeight) : sourceHeight;
+    let width: number = this.viewportWidth > 0 ? this.viewportWidth * sourceWidth / viewportPixelWidth : px2vp(sourceWidth);
+    let height: number = this.viewportHeight > 0 ? this.viewportHeight * sourceHeight / viewportPixelHeight : px2vp(sourceHeight);
+
+    if (this.viewportWidth > 0 && this.viewportHeight > 0) {
+      const scale: number = Math.min(1, this.viewportWidth / width, this.viewportHeight / height);
+      width *= scale;
+      height *= scale;
+    }
+
+    this.displayWidth = Math.max(1, width);
+    this.displayHeight = Math.max(1, height);
+  }
+
+  private setKeepScreenOn(enabled: boolean): void {
+    if (this.keepScreenOn === enabled) {
+      return;
+    }
+
+    this.keepScreenOn = enabled;
+    window.getLastWindow(getContext(this), (err, mainWindow) => {
+      if (err.code) {
+        this.status = `Failed to update screen wake state: ${JSON.stringify(err)}`;
+        this.keepScreenOn = !enabled;
+        return;
+      }
+      mainWindow.setWindowKeepScreenOn(enabled, (setErr) => {
+        if (setErr.code) {
+          this.status = `Failed to update screen wake state: ${JSON.stringify(setErr)}`;
+          this.keepScreenOn = !enabled;
+        }
+      });
+    });
   }
 
   private startStatsTimer(): void {
@@ -83,9 +129,11 @@ struct Index {
     this.streamWidth = stats.streamWidth;
     this.streamHeight = stats.streamHeight;
     this.streamFps = stats.streamFps;
+    this.updateDisplaySize();
     this.surfaceReady = stats.surfaceReady;
     this.decoderStarted = stats.decoderStarted;
     this.lastError = stats.lastError;
+    this.setKeepScreenOn(stats.running && stats.decoderStarted);
     if (stats.renderedOutputs > 0 && stats.lastError === 0) {
       this.showOverlay = false;
     }
@@ -111,6 +159,7 @@ struct Index {
     this.refreshStats();
     this.status = 'Receiver stopped.';
     this.showOverlay = true;
+    this.setKeepScreenOn(false);
   }
 
   @Builder
@@ -190,8 +239,8 @@ struct Index {
   build() {
     Stack({ alignContent: Alignment.Center }) {
       XComponent({ id: 'h265Surface', type: XComponentType.SURFACE, libraryname: 'h265receiver' })
-        .width('100%')
-        .height('100%')
+        .width(this.displayWidth > 0 ? this.displayWidth : '100%')
+        .height(this.displayHeight > 0 ? this.displayHeight : '100%')
         .backgroundColor(Color.Black)
         .onClick(() => {
           this.showOverlay = !this.showOverlay;
@@ -204,5 +253,11 @@ struct Index {
     .width('100%')
     .height('100%')
     .backgroundColor(Color.Black)
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM, SafeAreaEdge.START, SafeAreaEdge.END])
+    .onAreaChange((_oldArea, newArea) => {
+      this.viewportWidth = Number.parseFloat(newArea.width.toString());
+      this.viewportHeight = Number.parseFloat(newArea.height.toString());
+      this.updateDisplaySize();
+    })
   }
 }
