@@ -3,6 +3,34 @@
     {
       "name": "start_window_background",
       "value": "#000000"
+    },
+    {
+      "name": "t2s_page_background",
+      "value": "#0B1220"
+    },
+    {
+      "name": "t2s_card_background",
+      "value": "#111827"
+    },
+    {
+      "name": "t2s_secondary_background",
+      "value": "#1F2937"
+    },
+    {
+      "name": "t2s_primary_text",
+      "value": "#F8FAFC"
+    },
+    {
+      "name": "t2s_secondary_text",
+      "value": "#CBD5E1"
+    },
+    {
+      "name": "t2s_subtle_text",
+      "value": "#94A3B8"
+    },
+    {
+      "name": "t2s_border",
+      "value": "#334155"
     }
   ]
 }

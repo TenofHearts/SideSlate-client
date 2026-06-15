@@ -1,5 +1,5 @@
 import h265receiver, { H265Stats } from 'libh265receiver.so';
-import { window } from '@kit.ArkUI';
+import { promptAction, window } from '@kit.ArkUI';
 
 const LISTEN_PORT: number = 7005;
 const DEFAULT_WIDTH: number = 1920;
@@ -25,7 +25,6 @@ struct Index {
   @State private surfaceReady: boolean = false;
   @State private decoderStarted: boolean = false;
   @State private lastError: number = 0;
-  @State private showOverlay: boolean = true;
   @State private receiveMbps: number = 0;
   @State private inputRate: number = 0;
   @State private renderRate: number = 0;
@@ -34,8 +33,10 @@ struct Index {
   @State private viewportHeight: number = 0;
   @State private displayWidth: number = 0;
   @State private displayHeight: number = 0;
+  @State private themeMode: string = 'system';
 
   private statsTimer: number = -1;
+  private noStreamTimer: number = -1;
   private lastStatsAt: number = 0;
   private lastBytes: number = 0;
   private lastQueuedInputs: number = 0;
@@ -44,8 +45,48 @@ struct Index {
   private keepScreenOn: boolean = false;
 
   aboutToDisappear(): void {
+    this.stopNoStreamTimer();
     this.stopReceiver();
     this.setKeepScreenOn(false);
+  }
+
+  onBackPress(): boolean {
+    if (!this.inDisplayMode()) {
+      return false;
+    }
+
+    this.stopReceiver();
+    return true;
+  }
+
+  private inDisplayMode(): boolean {
+    return this.running && this.decoderStarted && this.lastError === 0;
+  }
+
+  private connectionLabel(): string {
+    if (this.lastError !== 0) {
+      return 'Recovery';
+    }
+    if (this.inDisplayMode()) {
+      return 'Streaming';
+    }
+    if (this.running) {
+      return 'Connecting';
+    }
+    return 'Idle';
+  }
+
+  private connectionColor(): ResourceColor {
+    if (this.lastError !== 0) {
+      return 0xffb91c1c;
+    }
+    if (this.inDisplayMode()) {
+      return 0xff15803d;
+    }
+    if (this.running) {
+      return 0xff2563eb;
+    }
+    return 0xff334155;
   }
 
   private updateDisplaySize(): void {
@@ -99,6 +140,27 @@ struct Index {
     }
   }
 
+  private startNoStreamTimer(): void {
+    this.stopNoStreamTimer();
+    this.noStreamTimer = setTimeout(() => {
+      if (this.running && this.packets === 0) {
+        this.stopReceiver();
+        promptAction.showToast({
+          message: 'No stream received from host within 10 seconds. Receiver stopped.',
+          duration: 3500,
+        });
+      }
+      this.noStreamTimer = -1;
+    }, 10000);
+  }
+
+  private stopNoStreamTimer(): void {
+    if (this.noStreamTimer !== -1) {
+      clearTimeout(this.noStreamTimer);
+      this.noStreamTimer = -1;
+    }
+  }
+
   private refreshStats(): void {
     const stats: H265Stats = h265receiver.getStats();
     const now: number = Date.now();
@@ -134,8 +196,8 @@ struct Index {
     this.decoderStarted = stats.decoderStarted;
     this.lastError = stats.lastError;
     this.setKeepScreenOn(stats.running && stats.decoderStarted);
-    if (stats.renderedOutputs > 0 && stats.lastError === 0) {
-      this.showOverlay = false;
+    if (stats.renderedOutputs > 0) {
+      this.stopNoStreamTimer();
     }
   }
 
@@ -145,95 +207,255 @@ struct Index {
     this.lastQueuedInputs = 0;
     this.lastRendered = 0;
     this.lastDropped = 0;
+    this.packets = 0;
+    this.rendered = 0;
+    this.dropped = 0;
+    this.bytes = 0;
+    this.queuedInputs = 0;
+    this.queueDepth = 0;
     const started: boolean = h265receiver.start(LISTEN_PORT, DEFAULT_WIDTH, DEFAULT_HEIGHT);
     this.running = started;
     this.status = started ? 'Receiver start requested.' : 'Receiver failed to start.';
-    this.showOverlay = true;
     this.startStatsTimer();
     this.refreshStats();
+    if (started) {
+      this.startNoStreamTimer();
+    }
   }
 
   private stopReceiver(): void {
+    this.stopNoStreamTimer();
     h265receiver.stop();
     this.stopStatsTimer();
     this.refreshStats();
     this.status = 'Receiver stopped.';
-    this.showOverlay = true;
     this.setKeepScreenOn(false);
   }
 
-  @Builder
-  private Overlay() {
-    Column({ space: 18 }) {
-      Text('Tablet2Screen')
-        .fontSize(30)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(Color.White)
-      Text(this.status)
-        .fontSize(16)
-        .fontColor(0xd1d5db)
+  private isDarkTheme(): boolean {
+    return this.themeMode !== 'light';
+  }
 
-      Column({ space: 6 }) {
-        Text('HDC setup on Windows')
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(Color.White)
-        Text('hdc fport tcp:17005 tcp:7005')
-          .fontSize(13)
-          .fontFamily('monospace')
-          .fontColor(0x93c5fd)
-        Text(`Listening: 127.0.0.1:${LISTEN_PORT}`)
-          .fontSize(13)
-          .fontColor(0xd1d5db)
+  private pageBackground(): ResourceColor {
+    if (this.themeMode === 'system') return $r('app.color.t2s_page_background');
+    return this.isDarkTheme() ? 0xff0b1220 : 0xffeef4f8;
+  }
+
+  private cardBackground(): ResourceColor {
+    if (this.themeMode === 'system') return $r('app.color.t2s_card_background');
+    return this.isDarkTheme() ? 0xee111827 : 0xeeffffff;
+  }
+
+  private secondaryBackground(): ResourceColor {
+    if (this.themeMode === 'system') return $r('app.color.t2s_secondary_background');
+    return this.isDarkTheme() ? 0xff1f2937 : 0xfff1f5f9;
+  }
+
+  private primaryText(): ResourceColor {
+    if (this.themeMode === 'system') return $r('app.color.t2s_primary_text');
+    return this.isDarkTheme() ? 0xfff8fafc : 0xff0f172a;
+  }
+
+  private secondaryText(): ResourceColor {
+    if (this.themeMode === 'system') return $r('app.color.t2s_secondary_text');
+    return this.isDarkTheme() ? 0xffcbd5e1 : 0xff475569;
+  }
+
+  private subtleText(): ResourceColor {
+    if (this.themeMode === 'system') return $r('app.color.t2s_subtle_text');
+    return this.isDarkTheme() ? 0xff94a3b8 : 0xff64748b;
+  }
+
+  private themeBorderColor(): ResourceColor {
+    if (this.themeMode === 'system') return $r('app.color.t2s_border');
+    return this.isDarkTheme() ? 0x26ffffff : 0x220f172a;
+  }
+
+  @Builder
+  private AmbientBackground() {
+    Column()
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.pageBackground())
+  }
+
+  @Builder
+  private ThemeChoice(label: string, value: string) {
+    Button(label)
+      .height(36)
+      .padding({ left: 14, right: 14 })
+      .backgroundColor(this.themeMode === value ? 0xff2563eb : this.secondaryBackground())
+      .fontColor(this.themeMode === value ? 0xffffffff : this.secondaryText())
+      .onClick(() => {
+        this.themeMode = value;
+      })
+  }
+
+  @Builder
+  private StatPill(label: string, value: string, accent: ResourceColor) {
+    Column({ space: 4 }) {
+      Text(value)
+        .fontSize(18)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(accent)
+      Text(label)
+        .fontSize(11)
+        .fontColor(this.subtleText())
+    }
+    .alignItems(HorizontalAlign.Start)
+    .padding(12)
+    .borderRadius(16)
+    .backgroundColor(this.secondaryBackground())
+    .border({ width: 1, color: this.themeBorderColor() })
+    .layoutWeight(1)
+  }
+
+  @Builder
+  private ConnectionMode() {
+    Stack() {
+      this.AmbientBackground()
+
+      Column({ space: 16 }) {
+        this.ReceiverCard()
+        this.DiagnosticsCard()
+        this.SettingsCard()
       }
       .width('100%')
-      .padding(14)
-      .backgroundColor(0x1f2937)
-      .borderRadius(14)
+      .height('100%')
+      .padding(22)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  private ReceiverCard() {
+    Column({ space: 14 }) {
+      Row() {
+        Text('RECEIVER')
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.primaryText())
+          .layoutWeight(1)
+          .textAlign(TextAlign.Start)
+        Button(this.running ? 'Receiver Active' : 'Start Receiver')
+          .enabled(!this.running)
+          .height(44)
+          .backgroundColor(0xff2563eb)
+          .fontColor(0xffffffff)
+          .onClick(() => this.startReceiver())
+      }
 
       Row({ space: 12 }) {
-        Button('Start Receiver')
-          .enabled(!this.running)
-          .onClick(() => this.startReceiver())
-        Button('Stop')
-          .enabled(this.running)
-          .backgroundColor(0xdc2626)
-          .onClick(() => this.stopReceiver())
-        Button('Hide Overlay')
-          .onClick(() => {
-            this.showOverlay = false;
-          })
-      }
-
-      Column({ space: 6 }) {
-        Text(`Surface: ${this.surfaceReady}  Decoder: ${this.decoderStarted}  Error: ${this.lastError}`)
-          .fontSize(13)
-          .fontColor(0xd1d5db)
-        Text(`Stream: ${this.streamWidth}x${this.streamHeight} @ ${this.streamFps} fps  Queue: ${this.queueDepth}`)
-          .fontSize(13)
-          .fontColor(0xd1d5db)
-        Text(`Packets: ${this.packets}  Rendered: ${this.rendered}  Dropped: ${this.dropped}`)
-          .fontSize(13)
-          .fontColor(0xd1d5db)
-        Text(`Rates: RX ${this.receiveMbps.toFixed(1)} Mbps  In ${this.inputRate.toFixed(1)}/s  Render ${this.renderRate.toFixed(1)}/s  Drop ${this.dropRate.toFixed(1)}/s`)
-          .fontSize(13)
-          .fontColor(0xd1d5db)
-        Text(`Config: ${this.configPackets}  Keyframes: ${this.keyframes}  Gaps: ${this.sequenceGaps}`)
-          .fontSize(13)
-          .fontColor(0xd1d5db)
-        Text(`Inputs: ${this.queuedInputs}  Bytes: ${this.bytes}`)
-          .fontSize(13)
-          .fontColor(0xd1d5db)
+        this.StatPill('USB transport', 'HDC forward', 0xff2563eb)
+        this.StatPill('Listen port', `${LISTEN_PORT}`, 0xff2563eb)
+        this.StatPill('Surface', this.surfaceReady ? 'Ready' : 'Waiting', this.surfaceReady ? 0xff16a34a : this.secondaryText())
+        this.StatPill('Decoder', this.decoderStarted ? 'Started' : 'Idle', this.decoderStarted ? 0xff16a34a : this.secondaryText())
       }
       .width('100%')
-      .padding(14)
-      .backgroundColor(0x111827)
-      .borderRadius(14)
+
+      Text('Connect the tablet by USB, enable HDC forwarding on the host, then start the receiver. Display mode opens automatically when video frames arrive.')
+        .fontSize(13)
+        .fontColor(this.secondaryText())
+
+      if (this.lastError !== 0) {
+        Column({ space: 6 }) {
+          Text('Recovery needed')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(0xffb91c1c)
+          Text(`Decoder error ${this.lastError}. Stop the receiver, verify the USB/HDC forward, then start again.`)
+            .fontSize(13)
+            .fontColor(0xffb91c1c)
+        }
+        .width('100%')
+        .padding(12)
+        .borderRadius(16)
+        .backgroundColor(0x22ef4444)
+      }
     }
-    .width(460)
-    .padding(22)
-    .backgroundColor(0xee0f172a)
-    .borderRadius(22)
+    .width('100%')
+    .padding(18)
+    .borderRadius(24)
+    .backgroundColor(this.cardBackground())
+    .border({ width: 1, color: this.themeBorderColor() })
+  }
+
+  @Builder
+  private DiagnosticsCard() {
+    Column({ space: 14 }) {
+      Text('DIAGNOSTICS')
+        .fontSize(22)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.primaryText())
+        .width('100%')
+        .textAlign(TextAlign.Start)
+
+      Row({ space: 12 }) {
+        this.StatPill('Input/s', this.inputRate.toFixed(1), this.primaryText())
+        this.StatPill('Render/s', this.renderRate.toFixed(1), this.primaryText())
+        this.StatPill('Drop/s', this.dropRate.toFixed(1), this.dropped > 0 ? 0xffdc2626 : this.primaryText())
+        this.StatPill('Queue', `${this.queueDepth}`, this.primaryText())
+      }
+      .width('100%')
+
+      Row({ space: 12 }) {
+        this.StatPill('Packets', `${this.packets}`, this.primaryText())
+        this.StatPill('Rendered', `${this.rendered}`, this.primaryText())
+        this.StatPill('Dropped', `${this.dropped}`, this.dropped > 0 ? 0xffdc2626 : this.primaryText())
+        this.StatPill('Bytes', `${this.bytes}`, this.primaryText())
+      }
+      .width('100%')
+
+      Text(`Stream ${this.streamWidth} x ${this.streamHeight} @ ${this.streamFps} fps | Config ${this.configPackets} | Keyframes ${this.keyframes} | Gaps ${this.sequenceGaps}`)
+        .fontSize(13)
+        .fontColor(this.secondaryText())
+    }
+    .width('100%')
+    .padding(18)
+    .borderRadius(24)
+    .backgroundColor(this.cardBackground())
+    .border({ width: 1, color: this.themeBorderColor() })
+  }
+
+  @Builder
+  private SettingsCard() {
+    Column({ space: 14 }) {
+      Text('SETTINGS')
+        .fontSize(22)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.primaryText())
+        .width('100%')
+        .textAlign(TextAlign.Start)
+
+      Row() {
+        Text('Appearance')
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.primaryText())
+          .width(150)
+        Text('Use system colors or force a light/dark receiver dashboard.')
+          .fontSize(12)
+          .fontColor(this.secondaryText())
+          .layoutWeight(1)
+        Row({ space: 8 }) {
+          this.ThemeChoice('System', 'system')
+          this.ThemeChoice('Light', 'light')
+          this.ThemeChoice('Dark', 'dark')
+        }
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .padding(12)
+      .borderRadius(16)
+      .backgroundColor(this.secondaryBackground())
+      .border({ width: 1, color: this.themeBorderColor() })
+    }
+    .width('100%')
+    .padding(18)
+    .borderRadius(24)
+    .backgroundColor(this.cardBackground())
+    .border({ width: 1, color: this.themeBorderColor() })
   }
 
   build() {
@@ -242,12 +464,10 @@ struct Index {
         .width(this.displayWidth > 0 ? this.displayWidth : '100%')
         .height(this.displayHeight > 0 ? this.displayHeight : '100%')
         .backgroundColor(Color.Black)
-        .onClick(() => {
-          this.showOverlay = !this.showOverlay;
-        })
+        .opacity(this.inDisplayMode() ? 1 : 0)
 
-      if (this.showOverlay) {
-        this.Overlay()
+      if (!this.inDisplayMode()) {
+        this.ConnectionMode()
       }
     }
     .width('100%')
