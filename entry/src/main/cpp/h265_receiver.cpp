@@ -2,9 +2,11 @@
 #include "t2s_protocol.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <memory>
 #include <string>
 
 #include <arpa/inet.h>
@@ -22,6 +24,26 @@ namespace {
 constexpr uint32_t T2S_LOG_DOMAIN = 0x545253;
 constexpr const char* T2S_LOG_TAG = "T2SH265";
 constexpr size_t MAX_PENDING_PACKETS = 1;
+
+class ScopedStatsThread {
+public:
+    ScopedStatsThread(std::shared_ptr<std::atomic<bool>> running, std::thread&& thread)
+        : running_(std::move(running)), thread_(std::move(thread))
+    {
+    }
+
+    ~ScopedStatsThread()
+    {
+        running_->store(false);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+private:
+    std::shared_ptr<std::atomic<bool>> running_;
+    std::thread thread_;
+};
 }
 
 H265Receiver& H265Receiver::Instance()
@@ -315,6 +337,36 @@ bool H265Receiver::HandleClient(int clientFd)
         return false;
     }
 
+    auto statsRunning = std::make_shared<std::atomic<bool>>(true);
+    ScopedStatsThread statsThread(statsRunning, std::thread([this, clientFd, statsRunning]() {
+        std::string statsError;
+        while (running_ && statsRunning->load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            H265Stats stats = GetStats();
+            t2s::ReceiverStatsPayload payload {};
+            payload.running = stats.running;
+            payload.decoderStarted = stats.decoderStarted;
+            payload.surfaceReady = stats.surfaceReady;
+            payload.packets = stats.packets;
+            payload.bytes = stats.bytes;
+            payload.queuedInputs = stats.queuedInputs;
+            payload.renderedOutputs = stats.renderedOutputs;
+            payload.droppedPackets = stats.droppedPackets;
+            payload.sequenceGaps = stats.sequenceGaps;
+            payload.configPackets = stats.configPackets;
+            payload.keyframes = stats.keyframes;
+            payload.lastSequence = stats.lastSequence;
+            payload.queueDepth = stats.queueDepth;
+            payload.streamWidth = stats.streamWidth;
+            payload.streamHeight = stats.streamHeight;
+            payload.streamFps = stats.streamFps;
+            payload.lastError = stats.lastError;
+            if (!t2s::WriteMessage(clientFd, {t2s::TYPE_STATS, 0, 0, 0, t2s::StatsPayload(payload)}, statsError)) {
+                break;
+            }
+        }
+    }));
+
     while (running_ && t2s::ReadMessage(clientFd, message, error)) {
         if (message.type == t2s::TYPE_STOP) {
             SetStatus("stop received");
@@ -346,10 +398,10 @@ void H265Receiver::DecodeLoop()
     while (running_) {
         Packet packet;
         InputBufferRef input;
-        if (!PopPacket(packet)) {
+        if (!PopInputBuffer(input)) {
             continue;
         }
-        if (!PopInputBuffer(input)) {
+        if (!PopPacket(packet)) {
             continue;
         }
         PushInputBuffer(input.index, input.buffer, packet);
@@ -372,9 +424,16 @@ void H265Receiver::EnqueuePacket(Packet&& packet)
     if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
         stats_.keyframes += 1;
     }
-    while (packets_.size() >= MAX_PENDING_PACKETS) {
-        if (!DropOneStalePacketLocked()) {
-            break;
+    while (packets_.size() >= MAX_PENDING_PACKETS && DropOneStalePacketLocked()) {
+    }
+    if (packets_.size() >= MAX_PENDING_PACKETS) {
+        if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
+            stats_.droppedPackets += packets_.size();
+            packets_.clear();
+        } else {
+            stats_.droppedPackets += 1;
+            stats_.queueDepth = static_cast<uint32_t>(packets_.size());
+            return;
         }
     }
     packets_.push_back(std::move(packet));
@@ -412,8 +471,11 @@ bool H265Receiver::PopPacket(Packet& packet)
     if (!running_.load() || packets_.empty()) {
         return false;
     }
-    packet = std::move(packets_.front());
-    packets_.pop_front();
+    if (packets_.size() > 1) {
+        stats_.droppedPackets += packets_.size() - 1;
+    }
+    packet = std::move(packets_.back());
+    packets_.clear();
     stats_.queueDepth = static_cast<uint32_t>(packets_.size());
     return true;
 }
@@ -444,7 +506,13 @@ void H265Receiver::PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Pa
     attr.pts = static_cast<int64_t>(packet.timestampUs);
     attr.size = static_cast<int32_t>(packet.payload.size());
     attr.offset = 0;
-    attr.flags = 0;
+    attr.flags = AVCODEC_BUFFER_FLAGS_NONE;
+    if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
+        attr.flags |= AVCODEC_BUFFER_FLAGS_SYNC_FRAME;
+    }
+    if ((packet.flags & t2s::FLAG_DROPPABLE) != 0) {
+        attr.flags |= AVCODEC_BUFFER_FLAGS_DISPOSABLE;
+    }
     OH_AVBuffer_SetBufferAttr(buffer, &attr);
 
     OH_AVErrCode result = OH_VideoDecoder_PushInputBuffer(decoder_, index);

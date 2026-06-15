@@ -50,10 +50,38 @@ struct VideoConfig {
     uint16_t gop = 15;
 };
 
+struct ReceiverStatsPayload {
+    bool running = false;
+    bool decoderStarted = false;
+    bool surfaceReady = false;
+    uint64_t packets = 0;
+    uint64_t bytes = 0;
+    uint64_t queuedInputs = 0;
+    uint64_t renderedOutputs = 0;
+    uint64_t droppedPackets = 0;
+    uint64_t sequenceGaps = 0;
+    uint64_t configPackets = 0;
+    uint64_t keyframes = 0;
+    uint32_t lastSequence = 0;
+    uint32_t queueDepth = 0;
+    int32_t streamWidth = 0;
+    int32_t streamHeight = 0;
+    int32_t streamFps = 0;
+    int32_t lastError = 0;
+    double receiveMbps = 0.0;
+    double inputFps = 0.0;
+    double renderFps = 0.0;
+    double dropFps = 0.0;
+    double maxReceiveGapMs = 0.0;
+    double maxInputGapMs = 0.0;
+    double maxRenderGapMs = 0.0;
+};
+
 bool ReadMessage(int socketFd, Message& message, std::string& error);
 bool WriteMessage(int socketFd, const Message& message, std::string& error);
 bool ParseVideoConfig(const Message& message, VideoConfig& config, std::string& error);
 std::vector<uint8_t> HelloAckPayload();
 std::vector<uint8_t> EmptyPayload();
+std::vector<uint8_t> StatsPayload(const ReceiverStatsPayload& stats);
 
 }

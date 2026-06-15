@@ -52,6 +52,19 @@ void WriteU64Le(uint8_t* data, uint64_t value)
     }
 }
 
+void WriteI32Le(uint8_t* data, int32_t value)
+{
+    WriteU32Le(data, static_cast<uint32_t>(value));
+}
+
+void WriteDoubleLe(uint8_t* data, double value)
+{
+    static_assert(sizeof(double) == sizeof(uint64_t));
+    uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    WriteU64Le(data, bits);
+}
+
 bool RecvExact(int socketFd, uint8_t* data, size_t size)
 {
     size_t offset = 0;
@@ -180,6 +193,44 @@ std::vector<uint8_t> HelloAckPayload()
 std::vector<uint8_t> EmptyPayload()
 {
     return {};
+}
+
+std::vector<uint8_t> StatsPayload(const ReceiverStatsPayload& stats)
+{
+    std::vector<uint8_t> payload(152, 0);
+    uint32_t flags = 0;
+    if (stats.running) {
+        flags |= 0x01;
+    }
+    if (stats.decoderStarted) {
+        flags |= 0x02;
+    }
+    if (stats.surfaceReady) {
+        flags |= 0x04;
+    }
+    WriteU32Le(payload.data(), flags);
+    WriteU64Le(payload.data() + 8, stats.packets);
+    WriteU64Le(payload.data() + 16, stats.bytes);
+    WriteU64Le(payload.data() + 24, stats.queuedInputs);
+    WriteU64Le(payload.data() + 32, stats.renderedOutputs);
+    WriteU64Le(payload.data() + 40, stats.droppedPackets);
+    WriteU64Le(payload.data() + 48, stats.sequenceGaps);
+    WriteU64Le(payload.data() + 56, stats.configPackets);
+    WriteU64Le(payload.data() + 64, stats.keyframes);
+    WriteU32Le(payload.data() + 72, stats.lastSequence);
+    WriteU32Le(payload.data() + 76, stats.queueDepth);
+    WriteI32Le(payload.data() + 80, stats.streamWidth);
+    WriteI32Le(payload.data() + 84, stats.streamHeight);
+    WriteI32Le(payload.data() + 88, stats.streamFps);
+    WriteI32Le(payload.data() + 92, stats.lastError);
+    WriteDoubleLe(payload.data() + 96, stats.receiveMbps);
+    WriteDoubleLe(payload.data() + 104, stats.inputFps);
+    WriteDoubleLe(payload.data() + 112, stats.renderFps);
+    WriteDoubleLe(payload.data() + 120, stats.dropFps);
+    WriteDoubleLe(payload.data() + 128, stats.maxReceiveGapMs);
+    WriteDoubleLe(payload.data() + 136, stats.maxInputGapMs);
+    WriteDoubleLe(payload.data() + 144, stats.maxRenderGapMs);
+    return payload;
 }
 
 }
