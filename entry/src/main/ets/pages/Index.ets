@@ -99,7 +99,7 @@ struct Index {
     let height: number = this.viewportHeight > 0 ? this.viewportHeight * sourceHeight / viewportPixelHeight : px2vp(sourceHeight);
 
     if (this.viewportWidth > 0 && this.viewportHeight > 0) {
-      const scale: number = Math.min(1, this.viewportWidth / width, this.viewportHeight / height);
+      const scale: number = Math.min(this.viewportWidth / width, this.viewportHeight / height);
       width *= scale;
       height *= scale;
     }
