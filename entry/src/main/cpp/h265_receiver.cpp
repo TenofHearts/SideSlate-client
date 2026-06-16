@@ -121,6 +121,36 @@ void H265Receiver::OnSurfaceDestroyed(OH_NativeXComponent*, void*)
 
 bool H265Receiver::Start(uint16_t port, int32_t width, int32_t height)
 {
+    if (running_) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        StopDecoderLocked();
+        packets_.clear();
+        inputBuffers_.clear();
+        frameTimings_.clear();
+        if (!configured_) {
+            width_ = width;
+            height_ = height;
+        }
+        hasLastSequence_ = false;
+        lastReceiveAt_ = {};
+        lastInputAt_ = {};
+        lastRenderAt_ = {};
+        stats_ = H265Stats{};
+        stats_.running = true;
+        stats_.surfaceReady = nativeWindow_ != nullptr;
+        if (configured_) {
+            stats_.streamWidth = width_;
+            stats_.streamHeight = height_;
+            stats_.status = "receiver restarted";
+            if (nativeWindow_) {
+                StartDecoderLocked();
+            }
+        } else {
+            stats_.status = "listening";
+        }
+        return true;
+    }
+
     Stop();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -141,6 +171,21 @@ bool H265Receiver::Start(uint16_t port, int32_t width, int32_t height)
     receiverThread_ = std::thread(&H265Receiver::ReceiverLoop, this, port);
     decodeThread_ = std::thread(&H265Receiver::DecodeLoop, this);
     return true;
+}
+
+void H265Receiver::Pause()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!running_) {
+        return;
+    }
+    StopDecoderLocked();
+    packets_.clear();
+    inputBuffers_.clear();
+    frameTimings_.clear();
+    stats_.decoderStarted = false;
+    stats_.queueDepth = 0;
+    stats_.status = "receiver stopped";
 }
 
 void H265Receiver::Stop()
@@ -434,9 +479,9 @@ bool H265Receiver::HandleClient(int clientFd)
         EnqueuePacket(std::move(packet));
     }
     if (running_ && !error.empty()) {
-        SetError(-10, error);
+        SetStatus("sender disconnected");
     }
-    return false;
+    return true;
 }
 
 void H265Receiver::DecodeLoop()

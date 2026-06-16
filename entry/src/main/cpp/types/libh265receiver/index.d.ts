@@ -24,6 +24,7 @@ export interface H265Stats {
 
 declare const h265receiver: {
   start(port: number, width: number, height: number): boolean;
+  pause(): void;
   stop(): void;
   getStats(): H265Stats;
 };

@@ -4,6 +4,7 @@ import { promptAction, window } from '@kit.ArkUI';
 const LISTEN_PORT: number = 7005;
 const DEFAULT_WIDTH: number = 1920;
 const DEFAULT_HEIGHT: number = 1080;
+const NO_STREAM_TIMEOUT_MS: number = 15000;
 
 @Entry
 @Component
@@ -144,14 +145,14 @@ struct Index {
     this.stopNoStreamTimer();
     this.noStreamTimer = setTimeout(() => {
       if (this.running && this.packets === 0) {
-        this.stopReceiver();
+        this.shutdownReceiver();
         promptAction.showToast({
-          message: 'No stream received from host within 10 seconds. Receiver stopped.',
+          message: 'No stream received from host within 15 seconds. Receiver stopped.',
           duration: 3500,
         });
       }
       this.noStreamTimer = -1;
-    }, 10000);
+    }, NO_STREAM_TIMEOUT_MS);
   }
 
   private stopNoStreamTimer(): void {
@@ -202,6 +203,10 @@ struct Index {
   }
 
   private startReceiver(): void {
+    if (this.running) {
+      this.stopNoStreamTimer();
+      h265receiver.pause();
+    }
     this.lastStatsAt = 0;
     this.lastBytes = 0;
     this.lastQueuedInputs = 0;
@@ -225,9 +230,22 @@ struct Index {
 
   private stopReceiver(): void {
     this.stopNoStreamTimer();
+    h265receiver.pause();
+    this.stopStatsTimer();
+    this.running = false;
+    this.decoderStarted = false;
+    this.queueDepth = 0;
+    this.status = 'Receiver stopped.';
+    this.setKeepScreenOn(false);
+  }
+
+  private shutdownReceiver(): void {
+    this.stopNoStreamTimer();
     h265receiver.stop();
     this.stopStatsTimer();
-    this.refreshStats();
+    this.running = false;
+    this.decoderStarted = false;
+    this.queueDepth = 0;
     this.status = 'Receiver stopped.';
     this.setKeepScreenOn(false);
   }
@@ -338,8 +356,7 @@ struct Index {
           .fontColor(this.primaryText())
           .layoutWeight(1)
           .textAlign(TextAlign.Start)
-        Button(this.running ? 'Receiver Active' : 'Start Receiver')
-          .enabled(!this.running)
+        Button(this.running ? 'Restart Receiver' : 'Start Receiver')
           .height(44)
           .backgroundColor(0xff2563eb)
           .fontColor(0xffffffff)

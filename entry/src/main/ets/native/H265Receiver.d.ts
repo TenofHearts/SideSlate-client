@@ -25,6 +25,7 @@ declare module 'libh265receiver.so' {
 
   const h265receiver: {
     start(port: number, width: number, height: number): boolean;
+    pause(): void;
     stop(): void;
     getStats(): H265Stats;
   };

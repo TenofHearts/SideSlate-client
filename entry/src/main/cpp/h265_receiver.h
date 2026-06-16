@@ -57,6 +57,7 @@ public:
     void OnSurfaceDestroyed(OH_NativeXComponent* component, void* window);
 
     bool Start(uint16_t port, int32_t width, int32_t height);
+    void Pause();
     void Stop();
     H265Stats GetStats();
 

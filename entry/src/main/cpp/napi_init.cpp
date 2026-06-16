@@ -34,6 +34,14 @@ napi_value Stop(napi_env env, napi_callback_info)
     return result;
 }
 
+napi_value Pause(napi_env env, napi_callback_info)
+{
+    H265Receiver::Instance().Pause();
+    napi_value result;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
 void SetNamedBool(napi_env env, napi_value object, const char* name, bool value)
 {
     napi_value napiValue;
@@ -88,6 +96,7 @@ napi_value Init(napi_env env, napi_value exports)
 {
     napi_property_descriptor descriptors[] = {
         {"start", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"pause", nullptr, Pause, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stop", nullptr, Stop, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getStats", nullptr, GetStats, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
