@@ -25,6 +25,48 @@ constexpr uint32_t T2S_LOG_DOMAIN = 0x545253;
 constexpr const char* T2S_LOG_TAG = "T2SH265";
 constexpr size_t MAX_PENDING_PACKETS = 1;
 constexpr size_t MAX_TRACKED_FRAME_TIMINGS = 240;
+constexpr size_t VIDEO_FRAGMENT_HEADER_SIZE = 20;
+constexpr int32_t DECODER_MAX_INPUT_SIZE = 8 * 1024 * 1024;
+
+uint16_t ReadU16Le(const uint8_t* data)
+{
+    return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
+}
+
+uint32_t ReadU32Le(const uint8_t* data)
+{
+    return static_cast<uint32_t>(data[0]) |
+        (static_cast<uint32_t>(data[1]) << 8) |
+        (static_cast<uint32_t>(data[2]) << 16) |
+        (static_cast<uint32_t>(data[3]) << 24);
+}
+
+struct FragmentedFrame {
+    bool active = false;
+    uint32_t sequence = 0;
+    uint64_t timestampUs = 0;
+    uint16_t flags = 0;
+    uint16_t fragmentCount = 0;
+    uint32_t totalLen = 0;
+    uint32_t receivedBytes = 0;
+    std::chrono::steady_clock::time_point firstReceivedAt {};
+    std::vector<uint8_t> payload;
+    std::vector<uint8_t> received;
+
+    void Reset()
+    {
+        active = false;
+        sequence = 0;
+        timestampUs = 0;
+        flags = 0;
+        fragmentCount = 0;
+        totalLen = 0;
+        receivedBytes = 0;
+        firstReceivedAt = {};
+        payload.clear();
+        received.clear();
+    }
+};
 
 class ScopedStatsThread {
 public:
@@ -247,6 +289,7 @@ bool H265Receiver::StartDecoderLocked()
     OH_AVFormat_SetStringValue(format, OH_MD_KEY_CODEC_MIME, OH_AVCODEC_MIMETYPE_VIDEO_HEVC);
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_WIDTH, width_);
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_HEIGHT, height_);
+    OH_AVFormat_SetIntValue(format, OH_MD_KEY_MAX_INPUT_SIZE, DECODER_MAX_INPUT_SIZE);
     OH_AVFormat_SetIntValue(format, OH_MD_KEY_VIDEO_ENABLE_LOW_LATENCY, 1);
 
     result = OH_VideoDecoder_Configure(decoder_, format);
@@ -399,6 +442,7 @@ bool H265Receiver::HandleClient(int clientFd)
         return false;
     }
 
+    FragmentedFrame fragmentedFrame;
     auto statsRunning = std::make_shared<std::atomic<bool>>(true);
     ScopedStatsThread statsThread(statsRunning, std::thread([this, clientFd, statsRunning]() {
         std::string statsError;
@@ -469,6 +513,60 @@ bool H265Receiver::HandleClient(int clientFd)
         if (message.payload.empty()) {
             SetError(-9, "empty video packet");
             return false;
+        }
+        if ((message.flags & t2s::FLAG_FRAGMENT) != 0) {
+            if (message.payload.size() < VIDEO_FRAGMENT_HEADER_SIZE) {
+                SetError(-10, "video fragment header too short");
+                return false;
+            }
+            const uint8_t* header = message.payload.data();
+            const uint32_t frameSequence = ReadU32Le(header);
+            const uint16_t fragmentIndex = ReadU16Le(header + 4);
+            const uint16_t fragmentCount = ReadU16Le(header + 6);
+            const uint16_t frameFlags = ReadU16Le(header + 8);
+            const uint32_t fragmentOffset = ReadU32Le(header + 12);
+            const uint32_t totalLen = ReadU32Le(header + 16);
+            const size_t fragmentLen = message.payload.size() - VIDEO_FRAGMENT_HEADER_SIZE;
+            if (fragmentCount == 0 || fragmentIndex >= fragmentCount || totalLen > t2s::MAX_PAYLOAD_LEN ||
+                fragmentOffset > totalLen || fragmentLen > totalLen - fragmentOffset) {
+                SetError(-11, "invalid video fragment");
+                return false;
+            }
+            if (!fragmentedFrame.active || fragmentedFrame.sequence != frameSequence ||
+                fragmentedFrame.timestampUs != message.timestampUs || fragmentedFrame.fragmentCount != fragmentCount ||
+                fragmentedFrame.totalLen != totalLen) {
+                fragmentedFrame.Reset();
+                fragmentedFrame.active = true;
+                fragmentedFrame.sequence = frameSequence;
+                fragmentedFrame.timestampUs = message.timestampUs;
+                fragmentedFrame.flags = frameFlags;
+                fragmentedFrame.fragmentCount = fragmentCount;
+                fragmentedFrame.totalLen = totalLen;
+                fragmentedFrame.firstReceivedAt = std::chrono::steady_clock::now();
+                fragmentedFrame.payload.assign(totalLen, 0);
+                fragmentedFrame.received.assign(fragmentCount, 0);
+            }
+            if (fragmentedFrame.received[fragmentIndex] == 0) {
+                std::memcpy(
+                    fragmentedFrame.payload.data() + fragmentOffset,
+                    message.payload.data() + VIDEO_FRAGMENT_HEADER_SIZE,
+                    fragmentLen);
+                fragmentedFrame.received[fragmentIndex] = 1;
+                fragmentedFrame.receivedBytes += static_cast<uint32_t>(fragmentLen);
+            }
+            if (fragmentedFrame.receivedBytes < fragmentedFrame.totalLen) {
+                continue;
+            }
+
+            Packet packet;
+            packet.sequence = fragmentedFrame.sequence;
+            packet.timestampUs = fragmentedFrame.timestampUs;
+            packet.flags = fragmentedFrame.flags;
+            packet.receivedAt = fragmentedFrame.firstReceivedAt;
+            packet.payload = std::move(fragmentedFrame.payload);
+            fragmentedFrame.Reset();
+            EnqueuePacket(std::move(packet));
+            continue;
         }
         Packet packet;
         packet.sequence = message.sequence;
@@ -571,7 +669,16 @@ void H265Receiver::PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Pa
     uint8_t* addr = OH_AVBuffer_GetAddr(buffer);
     int32_t capacity = OH_AVBuffer_GetCapacity(buffer);
     if (!addr || capacity < static_cast<int32_t>(packet.payload.size())) {
-        SetError(-4, "input buffer too small");
+        OH_AVCodecBufferAttr attr {};
+        attr.pts = static_cast<int64_t>(packet.timestampUs);
+        attr.size = 0;
+        attr.offset = 0;
+        attr.flags = AVCODEC_BUFFER_FLAGS_DISPOSABLE;
+        OH_AVBuffer_SetBufferAttr(buffer, &attr);
+        OH_VideoDecoder_PushInputBuffer(decoder_, index);
+        std::lock_guard<std::mutex> lock(mutex_);
+        stats_.droppedPackets += 1;
+        stats_.status = "dropped oversized decoder input";
         return;
     }
 

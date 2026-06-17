@@ -182,7 +182,7 @@ std::vector<uint8_t> HelloAckPayload()
     std::vector<uint8_t> payload;
     payload.reserve(8);
     payload.insert(payload.end(), {VERSION, 1, 0, 0});
-    uint32_t capabilities = CAP_HEVC | CAP_STATS | CAP_KEYFRAME_REQUEST;
+    uint32_t capabilities = CAP_HEVC | CAP_STATS | CAP_KEYFRAME_REQUEST | CAP_FRAGMENTED_VIDEO;
     payload.push_back(static_cast<uint8_t>(capabilities & 0xff));
     payload.push_back(static_cast<uint8_t>((capabilities >> 8) & 0xff));
     payload.push_back(static_cast<uint8_t>((capabilities >> 16) & 0xff));

@@ -25,10 +25,12 @@ constexpr uint16_t FLAG_KEYFRAME = 0x0001;
 constexpr uint16_t FLAG_CONFIG_NAL = 0x0002;
 constexpr uint16_t FLAG_VCL = 0x0004;
 constexpr uint16_t FLAG_DROPPABLE = 0x0020;
+constexpr uint16_t FLAG_FRAGMENT = 0x0040;
 
 constexpr uint32_t CAP_HEVC = 0x00000001;
 constexpr uint32_t CAP_STATS = 0x00000004;
 constexpr uint32_t CAP_KEYFRAME_REQUEST = 0x00000008;
+constexpr uint32_t CAP_FRAGMENTED_VIDEO = 0x00000010;
 
 constexpr uint8_t CODEC_HEVC = 1;
 
