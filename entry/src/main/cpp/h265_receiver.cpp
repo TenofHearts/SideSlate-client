@@ -1,7 +1,6 @@
 #include "h265_receiver.h"
 #include "t2s_protocol.h"
 
-#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -23,7 +22,7 @@
 namespace {
 constexpr uint32_t T2S_LOG_DOMAIN = 0x545253;
 constexpr const char* T2S_LOG_TAG = "T2SH265";
-constexpr size_t MAX_PENDING_PACKETS = 1;
+constexpr size_t MAX_PENDING_PACKETS = 4;
 constexpr size_t MAX_TRACKED_FRAME_TIMINGS = 240;
 constexpr size_t VIDEO_FRAGMENT_HEADER_SIZE = 20;
 constexpr int32_t DECODER_MAX_INPUT_SIZE = 8 * 1024 * 1024;
@@ -599,7 +598,7 @@ void H265Receiver::DecodeLoop()
 
 void H265Receiver::EnqueuePacket(Packet&& packet)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     auto now = std::chrono::steady_clock::now();
     stats_.maxReceiveGapMs = std::max(stats_.maxReceiveGapMs, MillisecondsBetween(lastReceiveAt_, now));
     lastReceiveAt_ = now;
@@ -616,22 +615,10 @@ void H265Receiver::EnqueuePacket(Packet&& packet)
     if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
         stats_.keyframes += 1;
     }
-    while (packets_.size() >= MAX_PENDING_PACKETS) {
-        if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
-            stats_.droppedPackets += packets_.size();
-            packets_.clear();
-            break;
-        }
-        auto stale = std::find_if(packets_.begin(), packets_.end(), [](const Packet& queued) {
-            return (queued.flags & t2s::FLAG_DROPPABLE) != 0;
-        });
-        if (stale != packets_.end()) {
-            packets_.erase(stale);
-            stats_.droppedPackets += 1;
-            continue;
-        }
-        stats_.droppedPackets += 1;
-        stats_.queueDepth = static_cast<uint32_t>(packets_.size());
+    packetCv_.wait(lock, [&] {
+        return !running_.load() || packets_.size() < MAX_PENDING_PACKETS;
+    });
+    if (!running_.load()) {
         return;
     }
     packets_.push_back(std::move(packet));
@@ -669,16 +656,13 @@ void H265Receiver::PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Pa
     uint8_t* addr = OH_AVBuffer_GetAddr(buffer);
     int32_t capacity = OH_AVBuffer_GetCapacity(buffer);
     if (!addr || capacity < static_cast<int32_t>(packet.payload.size())) {
-        OH_AVCodecBufferAttr attr {};
-        attr.pts = static_cast<int64_t>(packet.timestampUs);
-        attr.size = 0;
-        attr.offset = 0;
-        attr.flags = AVCODEC_BUFFER_FLAGS_DISPOSABLE;
-        OH_AVBuffer_SetBufferAttr(buffer, &attr);
-        OH_VideoDecoder_PushInputBuffer(decoder_, index);
-        std::lock_guard<std::mutex> lock(mutex_);
-        stats_.droppedPackets += 1;
-        stats_.status = "dropped oversized decoder input";
+        const auto payloadSize = packet.payload.size();
+        const std::string status = "decoder input too small: capacity=" + std::to_string(capacity) +
+            " payload=" + std::to_string(payloadSize);
+        SetError(AV_ERR_NO_MEMORY, status);
+        running_ = false;
+        packetCv_.notify_all();
+        inputCv_.notify_all();
         return;
     }
 
@@ -690,9 +674,6 @@ void H265Receiver::PushInputBuffer(uint32_t index, OH_AVBuffer* buffer, const Pa
     attr.flags = AVCODEC_BUFFER_FLAGS_NONE;
     if ((packet.flags & t2s::FLAG_KEYFRAME) != 0) {
         attr.flags |= AVCODEC_BUFFER_FLAGS_SYNC_FRAME;
-    }
-    if ((packet.flags & t2s::FLAG_DROPPABLE) != 0) {
-        attr.flags |= AVCODEC_BUFFER_FLAGS_DISPOSABLE;
     }
     OH_AVBuffer_SetBufferAttr(buffer, &attr);
 
